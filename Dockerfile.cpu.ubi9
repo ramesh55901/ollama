@@ -32,13 +32,27 @@ RUN --mount=type=cache,target=/root/.ccache \
        done
 
 FROM base AS build
+
+ARG VERSION=0.32.0
+
 WORKDIR /go/src/github.com/ollama/ollama
+
 COPY go.mod go.sum ./
 RUN go mod download
+
 COPY . .
+
 ENV CGO_ENABLED=1
+
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    go build -trimpath -buildmode=pie -o /bin/ollama .
+    go build \
+      -trimpath \
+      -buildmode=pie \
+      -ldflags="-w -s \
+        -X=github.com/ollama/ollama/version.Version=${VERSION} \
+        -X=github.com/ollama/ollama/server.mode=release" \
+      -o /bin/ollama .
+
 
 FROM scratch AS image-archive
 COPY --from=build /bin/ollama /bin/ollama
