@@ -1,0 +1,88 @@
+# Dockerfile.cpu
+#
+# CPU-only Ollama build (AMD64)
+# Derived from the upstream Dockerfile with GPU-specific stages removed.
+#
+# NOTE:
+# This is a template preserving the CPU build flow:
+#   base -> cpu-deps -> llama-server-cpu -> build -> runtime
+#
+# Replace the base image with your IBM UBI9 builder if desired.
+
+FROM registry.access.redhat.com/ubi9/ubi:9.8-1782841664 AS base
+
+ARG CMAKEVERSION=3.31.2
+ARG NINJAVERSION=1.12.1
+
+RUN dnf install -y \
+    gcc \
+    gcc-c++ \
+    make \
+    git \
+    unzip \
+    cmake \
+    ninja-build \
+    golang \
+    libgomp \
+    && dnf clean all
+
+ENV CMAKE_GENERATOR=Ninja
+ENV LDFLAGS=-s
+
+FROM base AS cpu-deps
+
+WORKDIR /src
+
+COPY LLAMA_CPP_VERSION .
+COPY llama/server llama/server
+COPY llama/compat llama/compat
+
+RUN cmake -S llama/server -B build/llama-server-cpu -DGGML_NATIVE=OFF \
+ && cmake --build build/llama-server-cpu -j"$(nproc)" \
+ && cmake --install build/llama-server-cpu \
+      --prefix /tmp/dist \
+      --component llama-server \
+      --strip \
+ && mkdir -p /tmp/dist/lib/ollama \
+ && cp -a /usr/lib64/libgomp.so* /tmp/dist/lib/ollama/ || true
+
+FROM base AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ENV CGO_ENABLED=1
+
+ARG VERSION=v0.32.0
+
+RUN go build \
+    -trimpath \
+    -buildmode=pie \
+    -ldflags="-w -s \
+      -X=github.com/ollama/ollama/version.Version=${VERSION} \
+      -X=github.com/ollama/ollama/server.mode=release" \
+    -o /tmp/ollama .
+
+FROM scratch AS image-archive
+
+COPY --from=cpu-deps /tmp/dist/lib/ollama /lib/ollama
+COPY --from=build /tmp/ollama /bin/ollama
+
+FROM registry.access.redhat.com/ubi9/ubi:9.8-1782841664
+
+RUN dnf install -y \
+      libgomp \
+      ca-certificates \
+    && dnf clean all
+
+COPY --from=image-archive /bin/ollama /usr/bin/ollama
+COPY --from=image-archive /lib/ollama /usr/lib/ollama
+
+ENV OLLAMA_HOST=0.0.0.0:11434
+EXPOSE 11434
+
+ENTRYPOINT ["/usr/bin/ollama"]
+CMD ["serve"]
